@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <!-- Plugin binaries must be OS-neutral: AnyCPU and NO RuntimeIdentifier. -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Configurations>Debug;Release;Test</Configurations>
+    <PackageId>Graphene.ErpTool</PackageId>
+    <Version>$([System.DateTime]::Now.ToString("1.yy.MM.dd"))</Version>
+    <Description>ERP control agent tool for AIOrchestrator: discover the data model, run EQL queries, create/update/delete records and manage many-to-many relations over a JWT-secured ERP REST API.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
+    <PackageRequireLicenseAcceptance>False</PackageRequireLicenseAcceptance>
+    <Copyright>Andrea Bruno</Copyright>
+    <RepositoryUrl>https://github.com/Graphene-Lab/ErpTool</RepositoryUrl>
+    <PackageTags>agent;tool;erp;rest;eql;crud;llm;automation</PackageTags>
+    <DefaultItemExcludes>$(DefaultItemExcludes);ErpTool.Harness\bin\**;ErpTool.Harness\obj\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <!-- Runtime plugin identity: AIOrchestrator.PluginUpdater reads these assembly metadata
+       attributes to know which NuGet package and version a loaded plugin comes from. -->
+  <ItemGroup>
+    <AssemblyMetadata Include="NuGetPackageId" Value="Graphene.ErpTool" />
+    <AssemblyMetadata Include="NuGetPackageVersion" Value="$(Version)" />
+  </ItemGroup>
+
+  <!-- Dual-reference pattern: the local sibling project wins when present (solution builds);
+       otherwise the NuGet package (1.* floating = always latest) is restored — required for
+       CI/standalone builds where the sibling sources are absent. -->
+  <ItemGroup>
+    <ProjectReference Include="..\AIOrchestrator\AIOrchestrator.csproj" Condition="Exists('..\AIOrchestrator\AIOrchestrator.csproj')" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Graphene.AIOrchestrator" Version="1.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="LICENSE.md">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+    <None Update="README.md">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+  </ItemGroup>
+
+  <!-- Nested harness must NOT compile into the plugin library: the SDK default **/*.cs
+       glob would otherwise include its sources (duplicate Main + harness types). -->
+  <ItemGroup>
+    <Compile Remove="ErpTool.Harness\**\*.cs" />
+  </ItemGroup>
+
+</Project>
