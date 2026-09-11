@@ -1,34 +1,40 @@
 # ErpTool
 
-Agent tool for **[AIOrchestrator](https://github.com/Graphene-Lab)** that lets an LLM drive a
-WebVella-style ERP (the `AI.Erp` fork or upstream `WebVella.Erp`) with full control: discover
-the data model, run EQL queries, create/update/delete records and manage many-to-many
-relations — all over a JWT-secured REST API.
+ErpTool is an agent tool for **[AIOrchestrator](https://github.com/Graphene-Lab)**. It lets an
+LLM control a WebVella ERP (the `AI.Erp` fork or the upstream `WebVella.Erp`). The agent can
+read the data model, run EQL queries, create, update and delete records, and add or remove
+many-to-many relations. All calls go to a REST API protected by JWT.
 
-`ErpTool` is a **plugin tool**: it ships as a GitHub Release zip (host deployment into
-`Tools/ErpTool/`) and as the NuGet package `Graphene.ErpTool`. It derives from
-`BaseAgentTool`; its public methods are rendered to the LLM as the snake_case methods below.
+ErpTool is a plugin tool. It is published in two channels:
 
-## Methods (agent surface)
+- a GitHub Release zip, which the host installs into `Tools/ErpTool/`;
+- the NuGet package `Graphene.ErpTool`.
 
-| Method | Purpose |
+The class derives from `BaseAgentTool`. Each public method becomes a tool method for the LLM
+(with a snake_case name).
+
+## Methods
+
+| Method | What it does |
 |---|---|
-| `get_schema(entity?)` | Discover entities and fields (name, label, type, required). **Call first.** |
-| `query(eql, parameters?)` | Run an EQL `SELECT` (read-only) with named parameters. |
-| `create_record(entity, fields)` | Create a record from a JSON object of field values. |
-| `update_record(entity, id, fields)` | Update a record by id (only the given fields change). |
-| `delete_record(entity, id)` | Delete a record by id. |
-| `manage_relation(relationId, originId, targetId, remove)` | Add/remove a many-to-many link. |
+| `get_schema(entity?)` | Lists every entity and its fields (name, label, type, required). **Call this first.** |
+| `query(eql, parameters?)` | Runs an EQL `SELECT` (read only) with named parameters. |
+| `create_record(entity, fields)` | Creates a record from a JSON object of field values. |
+| `update_record(entity, id, fields)` | Updates a record by id. Only the given fields change. |
+| `delete_record(entity, id)` | Deletes a record by id. |
+| `manage_relation(relationId, originId, targetId, remove)` | Adds or removes a many-to-many link. |
 
-Every operation runs **as the configured ERP user**, so the ERP's own per-entity permissions,
-hooks and validation apply. `ErpTool` is not a database client — it never bypasses the ERP.
+Every call runs as the configured ERP user. The ERP permissions, hooks and validation still
+apply. ErpTool does not write to the database directly.
 
-## Configuration (host-provided, never agent-provided)
+## Configuration
 
-Connection settings are resolved in this order:
+ErpTool reads the connection settings from the host, not from the agent. It uses these sources,
+in order:
 
-1. Environment variables — `ERP_BASE_URL`, `ERP_USER`, `ERP_PASSWORD`.
-2. `PersistentData/erp.json` in the host's base directory (a folder updates never touch):
+1. Environment variables: `ERP_BASE_URL`, `ERP_USER`, `ERP_PASSWORD`.
+2. The file `PersistentData/erp.json` in the host base directory. An app update does not change
+   this folder:
 
 ```json
 {
@@ -38,20 +44,21 @@ Connection settings are resolved in this order:
 }
 ```
 
-If none is set, every method returns a clear `Error:` explaining what to configure.
+If no setting is found, every method returns an `Error:` message that says what to configure.
 
-## ERP-side requirement
+## ERP side
 
-The tool talks to the **`AgentApi` plugin** (`AI.Erp.Plugins.AgentApi`), which must be
-installed on the ERP and registered in its host site. The plugin is **dual-target** — the same
-source builds for the `AI.Erp` fork and for upstream `WebVella.Erp`. See the plugin's
-`ARCHITECTURE.md` for the fork/vendor duality (global `using` aliases + an `ErpFlavor` build
-switch). `ErpTool` itself is target-agnostic: it is pure HTTP against a stable REST contract.
+The tool calls the **`AgentApi` plugin** (`AI.Erp.Plugins.AgentApi`). This plugin must be
+installed on the ERP and registered in its host site. The plugin has two build targets: the
+`AI.Erp` fork and the upstream `WebVella.Erp`. See the plugin `ARCHITECTURE.md` for the details
+(`using` aliases and the `ErpFlavor` build switch). ErpTool itself does not depend on the
+target: it only uses HTTP and a stable REST contract.
 
 ## Install (hosts)
 
-Drop the release zip into `Tools/ErpTool/`; the host discovers it at startup (or hot-adds it).
-The plugin ships only its own files — the AIOrchestrator dependency graph is provided by the host.
+Copy the release zip into `Tools/ErpTool/`. The host finds it at startup, or adds it while the
+app is running. The zip contains only the plugin files. The AIOrchestrator libraries come from
+the host.
 
 ## License
 
