@@ -54,6 +54,8 @@
        glob would otherwise include its sources (duplicate Main + harness types). -->
   <ItemGroup>
     <Compile Remove="ErpTool.Harness\**\*.cs" />
+    <Compile Remove="ErpTool.Tests\**\*.cs" />
+    <Compile Remove="ErpAgent.LiveTest\**\*.cs" />
   </ItemGroup>
 
 </Project>

@@ -123,6 +123,85 @@ public class ErpTool : BaseAgentTool
     }
 
     // ──────────────────────────────────────────────
+    //  Composed business operations (one call = many steps)
+    // ──────────────────────────────────────────────
+
+    /// <summary>Create a sales order with its line items in one call. Product prices are read from the ERP and totals computed for you.</summary>
+    /// <param name="customerId">Customer record id (GUID).</param>
+    /// <param name="lines">JSON array of line items, e.g. [{"sku":"SKU-1001","quantity":3},{"sku":"SKU-2001","quantity":10,"discountPercent":5}]. Optional "unitPrice" overrides the catalog price.</param>
+    /// <param name="orderDate">Optional order date (yyyy-MM-dd); defaults to today.</param>
+    /// <param name="requiredDate">Optional required date (yyyy-MM-dd).</param>
+    /// <param name="currency">Optional currency code; defaults to EUR.</param>
+    /// <returns>JSON with the created order id, order_number, total and lines, or "Error:" with the cause.</returns>
+    public string PlaceSalesOrder(string customerId, string lines, string? orderDate = null, string? requiredDate = null, string? currency = null)
+    {
+        Log.LogStep($"ErpTool.PlaceSalesOrder: customer={customerId}");
+        if (!Guid.TryParse(customerId, out var cid)) return "Error: 'customerId' must be a valid GUID.";
+        if (JsonNode.Parse(lines) is not JsonArray arr || arr.Count == 0) return "Error: 'lines' must be a non-empty JSON array like [{\"sku\":\"SKU-1001\",\"quantity\":2}].";
+        var body = new JsonObject { ["customer_id"] = cid.ToString(), ["lines"] = arr };
+        if (!string.IsNullOrWhiteSpace(orderDate)) body["order_date"] = orderDate;
+        if (!string.IsNullOrWhiteSpace(requiredDate)) body["required_date"] = requiredDate;
+        if (!string.IsNullOrWhiteSpace(currency)) body["currency"] = currency;
+        return Call("POST", "composed/sales-order", body, "place sales order");
+    }
+
+    /// <summary>Turn an existing sales order into a sent invoice in one call.</summary>
+    /// <param name="orderId">Sales order id (GUID).</param>
+    /// <param name="dueDays">Days until the invoice is due; defaults to 30.</param>
+    /// <returns>JSON with the invoice id, number, amount and due date, or "Error:" with the cause.</returns>
+    public string InvoiceSalesOrder(string orderId, int dueDays = 30)
+    {
+        Log.LogStep($"ErpTool.InvoiceSalesOrder: order={orderId}");
+        if (!Guid.TryParse(orderId, out var oid)) return "Error: 'orderId' must be a valid GUID.";
+        var body = new JsonObject { ["order_id"] = oid.ToString(), ["due_days"] = dueDays };
+        return Call("POST", "composed/invoice", body, "create invoice");
+    }
+
+    /// <summary>Record a payment against an invoice and update its status (paid/partial) in one call.</summary>
+    /// <param name="invoiceId">Invoice id (GUID).</param>
+    /// <param name="amount">Payment amount.</param>
+    /// <param name="method">Payment method: bank, card or cash; defaults to bank.</param>
+    /// <param name="paymentDate">Optional payment date (yyyy-MM-dd); defaults to today.</param>
+    /// <returns>JSON with the payment id, new invoice status, paid total and balance, or "Error:" with the cause.</returns>
+    public string RecordPayment(string invoiceId, decimal amount, string? method = null, string? paymentDate = null)
+    {
+        Log.LogStep($"ErpTool.RecordPayment: invoice={invoiceId} amount={amount}");
+        if (!Guid.TryParse(invoiceId, out var iid)) return "Error: 'invoiceId' must be a valid GUID.";
+        var body = new JsonObject { ["invoice_id"] = iid.ToString(), ["amount"] = amount };
+        if (!string.IsNullOrWhiteSpace(method)) body["method"] = method;
+        if (!string.IsNullOrWhiteSpace(paymentDate)) body["payment_date"] = paymentDate;
+        return Call("POST", "composed/payment", body, "record payment");
+    }
+
+    /// <summary>Create a purchase order with its line items in one call.</summary>
+    /// <param name="supplierId">Supplier record id (GUID).</param>
+    /// <param name="lines">JSON array of line items, e.g. [{"sku":"SKU-1001","quantity":50,"unitCost":9.0}]. Optional "unitCost" overrides the catalog cost.</param>
+    /// <param name="orderDate">Optional order date (yyyy-MM-dd); defaults to today.</param>
+    /// <param name="expectedDate">Optional expected delivery date (yyyy-MM-dd).</param>
+    /// <returns>JSON with the purchase order id, number, total and lines, or "Error:" with the cause.</returns>
+    public string PlacePurchaseOrder(string supplierId, string lines, string? orderDate = null, string? expectedDate = null)
+    {
+        Log.LogStep($"ErpTool.PlacePurchaseOrder: supplier={supplierId}");
+        if (!Guid.TryParse(supplierId, out var sid)) return "Error: 'supplierId' must be a valid GUID.";
+        if (JsonNode.Parse(lines) is not JsonArray arr || arr.Count == 0) return "Error: 'lines' must be a non-empty JSON array like [{\"sku\":\"SKU-1001\",\"quantity\":50}].";
+        var body = new JsonObject { ["supplier_id"] = sid.ToString(), ["lines"] = arr };
+        if (!string.IsNullOrWhiteSpace(orderDate)) body["order_date"] = orderDate;
+        if (!string.IsNullOrWhiteSpace(expectedDate)) body["expected_date"] = expectedDate;
+        return Call("POST", "composed/purchase-order", body, "place purchase order");
+    }
+
+    /// <summary>Receive a purchase order: add each line's quantity to product stock and mark the order received, in one call.</summary>
+    /// <param name="purchaseOrderId">Purchase order id (GUID).</param>
+    /// <returns>JSON with the updated stock per product, or "Error:" with the cause.</returns>
+    public string ReceivePurchaseOrder(string purchaseOrderId)
+    {
+        Log.LogStep($"ErpTool.ReceivePurchaseOrder: po={purchaseOrderId}");
+        if (!Guid.TryParse(purchaseOrderId, out var pid)) return "Error: 'purchaseOrderId' must be a valid GUID.";
+        var body = new JsonObject { ["purchase_order_id"] = pid.ToString() };
+        return Call("POST", "composed/receive", body, "receive purchase order");
+    }
+
+    // ──────────────────────────────────────────────
     //  HTTP + auth plumbing
     // ──────────────────────────────────────────────
 
