@@ -21,12 +21,19 @@ internal static class Program
     static readonly List<(string Entity, string Id)> Created = new();
 
     // Shared records resolved/created once in Setup for the composed-flow and consistency tests.
-    static string _alpine = "", _supplier = "";
+    static string _alpine = "", _supplier = "", _suspended = "";
     static string _soId = "", _invId = "", _poId = "";
-    static decimal _stock1001Before;
-    static JsonNode? _soRes, _invRes, _poRes, _recvRes;
+    static decimal _stock1001PreRecv, _invGrandTotal;
+    static JsonNode? _soRes, _delivRes, _invRes, _poRes, _recvRes;
     static JsonNode? _custCreateRes, _partialRes, _fullRes;
     static string _payId = "";   // captured by the partial-payment test, reused by the FK test
+
+    // Records for the v2 composed new-flow chains (built lazily inside AddNewFlows cases).
+    static JsonNode? _quoteRes, _q2oRes, _delivQRes, _invQRes, _cnRes;
+    static string _quoteId = "", _q2oOrderId = "", _invQId = "";
+    static decimal _invQGrandTotal;
+    static JsonNode? _prRes, _r2poRes, _recvChainRes, _billRes, _supPayRes, _scnRes;
+    static string _prId = "", _r2poPoId = "", _billId = "";
 
     static int Main()
     {
@@ -50,6 +57,7 @@ internal static class Program
         AddSupplierCrud(t);
         AddSalesFlow(t);
         AddPurchaseFlow(t);
+        AddNewFlows(t);
         AddNegative(t);
         AddConsistency(t);
 
@@ -87,20 +95,24 @@ internal static class Program
         // Make the run idempotent: remove any customer/product/supplier not in the seed set
         // (leftovers from earlier crashed runs). These have no FK children (composed orders
         // only ever reference seeded rows), so deletes are safe.
-        PurgeNonSeed("customer", "name", new[] { "Alpine Coffee Roasters", "Bavarian Deli", "City Books Ltd", "Delta Office Supplies", "Evergreen Grocers" });
+        PurgeNonSeed("customer", "name", new[] { "Alpine Coffee Roasters", "Bavarian Deli", "City Books Ltd", "Delta Office Supplies", "Evergreen Grocers", "Suspended Trading Co" });
         PurgeNonSeed("product", "sku", new[] { "SKU-1001", "SKU-1002", "SKU-2001", "SKU-2002", "SKU-3001", "SKU-3002", "SKU-4001", "SKU-4002", "SKU-5001", "SKU-5002", "SKU-6001", "SKU-9999" });
         PurgeNonSeed("supplier", "name", new[] { "Global Packaging Co", "Prime Coffee Importers", "OfficePro Distribution", "TeaLeaf Traders" });
 
         _alpine = IdOf(Query("SELECT id FROM customer WHERE name = @n", P("n", "Alpine Coffee Roasters")), "seed customer Alpine");
         _supplier = IdOf(Query("SELECT id FROM supplier WHERE name = @n", P("n", "Prime Coffee Importers")), "seed supplier Prime Coffee Importers");
-        _stock1001Before = Dec(First(Query("SELECT stock_quantity FROM product WHERE sku = @s", P("s", "SKU-1001")))["stock_quantity"]);
+        _suspended = IdOf(Query("SELECT id FROM customer WHERE name = @n", P("n", "Suspended Trading Co")), "seed customer Suspended Trading Co");
 
-        // Main sales order (2 lines) + invoice, used by the sales-flow and FK tests.
+        // Main sales order (2 lines), delivered, then invoiced. In v2 an invoice can only be
+        // raised against delivered quantities, so the order must be delivered first.
         _soRes = J(Tool.PlaceSalesOrder(_alpine,
             "[{\"sku\":\"SKU-1001\",\"quantity\":3},{\"sku\":\"SKU-2001\",\"quantity\":10,\"discountPercent\":5}]"));
         _soId = _soRes["result"]!["order_id"]!.GetValue<string>();
+        _delivRes = J(Tool.DeliverSalesOrder(_soId,
+            "[{\"sku\":\"SKU-1001\",\"quantity\":3},{\"sku\":\"SKU-2001\",\"quantity\":10}]", "WH1"));
         _invRes = J(Tool.InvoiceSalesOrder(_soId, 30));
         _invId = _invRes["result"]!["invoice_id"]!.GetValue<string>();
+        _invGrandTotal = Dec(_invRes["result"]!["grand_total"]);
 
         // Purchase order (SKU-1001 x50 @9.00), received later in the purchase-flow tests.
         _poRes = J(Tool.PlacePurchaseOrder(_supplier,
@@ -179,7 +191,7 @@ internal static class Program
         t.Add(("schema_product_has_key_fields", () =>
         {
             var have = FieldNames("product");
-            foreach (var want in new[] { "sku", "name", "unit_price", "unit_cost", "stock_quantity", "reorder_point", "active" })
+            foreach (var want in new[] { "sku", "name", "unit_price", "unit_cost", "stock_quantity", "min_stock", "max_stock", "active" })
                 Need(have.Contains(want), $"product missing field '{want}'");
             return true;
         }));
@@ -266,12 +278,12 @@ internal static class Program
         string id = Guid.NewGuid().ToString();
         string sku = "SKU-T" + Tag();
 
-        t.Add(("prod_create_ok", () => { Ok(Tool.CreateRecord("product", $"{{\"id\":\"{id}\",\"sku\":\"{sku}\",\"name\":\"Temp Product\",\"unit_price\":10,\"unit_cost\":4,\"stock_quantity\":20,\"reorder_point\":5,\"active\":true}}")); Track("product", id); return true; }));
+        t.Add(("prod_create_ok", () => { Ok(Tool.CreateRecord("product", $"{{\"id\":\"{id}\",\"sku\":\"{sku}\",\"name\":\"Temp Product\",\"unit_price\":10,\"unit_cost\":4,\"stock_quantity\":20,\"min_stock\":5,\"active\":true}}")); Track("product", id); return true; }));
         t.Add(("prod_query_by_sku_found", () => { var r = First(Query("SELECT name FROM product WHERE sku = @s", P("s", sku))); Need(r["name"]!.GetValue<string>() == "Temp Product", "not found by sku"); return true; }));
         t.Add(("prod_update_price_persisted", () => { Ok(Tool.UpdateRecord("product", id, "{\"unit_price\":12.75}")); var r = First(Query("SELECT unit_price FROM product WHERE sku = @s", P("s", sku))); Need(Close(Dec(r["unit_price"]), 12.75m), "price not persisted: " + r["unit_price"]); return true; }));
         t.Add(("prod_update_stock_persisted", () => { Ok(Tool.UpdateRecord("product", id, "{\"stock_quantity\":99}")); var r = First(Query("SELECT stock_quantity FROM product WHERE sku = @s", P("s", sku))); Need(Close(Dec(r["stock_quantity"]), 99m), "stock not persisted: " + r["stock_quantity"]); return true; }));
         t.Add(("prod_update_active_false_persisted", () => { Ok(Tool.UpdateRecord("product", id, "{\"active\":false}")); var r = First(Query("SELECT active FROM product WHERE sku = @s", P("s", sku))); Need(!r["active"]!.GetValue<bool>(), "active=false not persisted"); return true; }));
-        t.Add(("prod_update_reorder_point_persisted", () => { Ok(Tool.UpdateRecord("product", id, "{\"reorder_point\":40}")); var r = First(Query("SELECT reorder_point FROM product WHERE sku = @s", P("s", sku))); Need(Close(Dec(r["reorder_point"]), 40m), "reorder_point not persisted: " + r["reorder_point"]); return true; }));
+        t.Add(("prod_update_min_stock_persisted", () => { Ok(Tool.UpdateRecord("product", id, "{\"min_stock\":40}")); var r = First(Query("SELECT min_stock FROM product WHERE sku = @s", P("s", sku))); Need(Close(Dec(r["min_stock"]), 40m), "min_stock not persisted: " + r["min_stock"]); return true; }));
         t.Add(("prod_query_by_name_found", () => { var r = First(Query("SELECT sku FROM product WHERE name = @n", P("n", "Temp Product"))); Need(r["sku"]!.GetValue<string>() == sku, "query by name failed"); return true; }));
         t.Add(("prod_delete_ok", () => { Ok(Tool.DeleteRecord("product", id)); return true; }));
         t.Add(("prod_gone_after_delete", () => { Need(Count(Query("SELECT id FROM product WHERE sku = @s", P("s", sku))) == 0, "product still present"); return true; }));
@@ -332,19 +344,21 @@ internal static class Program
     // ────────────────────────────────────────────────────────────
     static void AddQueryReporting(List<(string, Func<bool>)> t)
     {
-        t.Add(("q_customer_count_5", () => { Need(Count(Query("SELECT id FROM customer")) == 5, "customer count != 5"); return true; }));
+        t.Add(("q_customer_count_6", () => { Need(Count(Query("SELECT id FROM customer")) == 6, "customer count != 6"); return true; }));
         t.Add(("q_product_count_12", () => { Need(Count(Query("SELECT id FROM product")) == 12, "product count != 12"); return true; }));
         t.Add(("q_supplier_count_4", () => { Need(Count(Query("SELECT id FROM supplier")) == 4, "supplier count != 4"); return true; }));
 
         t.Add(("q_customers_wholesale_2", () => { Need(Count(Query("SELECT id FROM customer WHERE category = @c", P("c", "wholesale"))) == 2, "wholesale != 2"); return true; }));
-        t.Add(("q_customers_retail_2", () => { Need(Count(Query("SELECT id FROM customer WHERE category = @c", P("c", "retail"))) == 2, "retail != 2"); return true; }));
+        t.Add(("q_customers_retail_3", () => { Need(Count(Query("SELECT id FROM customer WHERE category = @c", P("c", "retail"))) == 3, "retail != 3"); return true; }));
         t.Add(("q_customers_vip_1", () => { Need(Count(Query("SELECT id FROM customer WHERE category = @c", P("c", "vip"))) == 1, "vip != 1"); return true; }));
 
-        t.Add(("q_below_reorder_set", () =>
+        t.Add(("q_blocked_customer_1", () => { Need(Count(Query("SELECT id FROM customer WHERE blocked = true")) == 1, "blocked != 1"); return true; }));
+
+        t.Add(("q_below_min_stock_set", () =>
         {
-            var skus = Skus(Query("SELECT sku FROM product WHERE stock_quantity < reorder_point"));
+            var skus = Skus(Query("SELECT sku FROM product WHERE stock_quantity < min_stock"));
             var want = new HashSet<string> { "SKU-2002", "SKU-5002" };
-            Need(new HashSet<string>(skus).SetEquals(want), $"below-reorder set mismatch: got [{string.Join(",", skus)}]");
+            Need(new HashSet<string>(skus).SetEquals(want), $"below-min-stock set mismatch: got [{string.Join(",", skus)}]");
             return true;
         }));
 
@@ -394,17 +408,27 @@ internal static class Program
         var inv = _invRes!["result"]!;
         t.Add(("inv_ok", () => { Need(_invRes!["result"] != null, "no invoice result"); return true; }));
         t.Add(("inv_amount_matches_order", () => { Need(Close(Dec(inv["amount"]), 121.05m), $"invoice amount {inv["amount"]} != 121.05"); return true; }));
-        t.Add(("inv_status_sent", () => { Need(inv["status"]!.GetValue<string>() == "sent", "invoice status != sent"); return true; }));
+        t.Add(("inv_status_sent", () =>
+        {
+            // The composed invoice result omits status; read it from the persisted invoice row.
+            var r = First(Query("SELECT status FROM invoice WHERE id = @i", P("i", _invId)));
+            Need(r["status"]!.GetValue<string>() == "sent", "invoice status != sent: " + r["status"]);
+            return true;
+        }));
         t.Add(("inv_due_date_plus30", () =>
         {
-            var issue = DateTime.Parse(inv["issue_date"]!.GetValue<string>(), CultureInfo.InvariantCulture);
-            var due = DateTime.Parse(inv["due_date"]!.GetValue<string>(), CultureInfo.InvariantCulture);
+            // issue_date is not in the composed result; read both dates from the invoice row.
+            var r = First(Query("SELECT issue_date, due_date FROM invoice WHERE id = @i", P("i", _invId)));
+            var issue = DateTime.Parse(r["issue_date"]!.GetValue<string>(), CultureInfo.InvariantCulture);
+            var due = DateTime.Parse(r["due_date"]!.GetValue<string>(), CultureInfo.InvariantCulture);
             Need(due == issue.AddDays(30), $"due {due:yyyy-MM-dd} != issue+30 {issue.AddDays(30):yyyy-MM-dd}");
             return true;
         }));
+        t.Add(("inv_grand_total_present", () => { Need(_invGrandTotal > Dec(inv["amount"]), "grand_total should exceed net amount (VAT-inclusive)"); return true; }));
         t.Add(("inv_number_present", () => { Need(!string.IsNullOrEmpty(inv["invoice_number"]!.GetValue<string>()), "no invoice_number"); return true; }));
 
-        // Partial payment (mutates the shared invoice). Capture the result once; assert its fields.
+        // Partial payment (mutates the shared invoice). In v2 the payable total is the
+        // VAT-inclusive grand_total, so balance = grand_total - paid.
         t.Add(("pay_partial_status_partial", () =>
         {
             _partialRes = J(Tool.RecordPayment(_invId, 50m, "card"));
@@ -412,9 +436,9 @@ internal static class Program
             Need(_partialRes["result"]!["invoice_status"]!.GetValue<string>() == "partial", "not partial");
             return true;
         }));
-        t.Add(("pay_partial_balance_71_05", () =>
+        t.Add(("pay_partial_balance_grand_minus_50", () =>
         {
-            Need(Close(Dec(_partialRes!["result"]!["balance"]), 71.05m), $"balance != 71.05: {_partialRes!["result"]!["balance"]}");
+            Need(Close(Dec(_partialRes!["result"]!["balance"]), _invGrandTotal - 50m), $"balance != grand_total-50 ({_invGrandTotal - 50m}): {_partialRes!["result"]!["balance"]}");
             return true;
         }));
         t.Add(("pay_partial_paid_total_50", () =>
@@ -424,7 +448,7 @@ internal static class Program
         }));
         t.Add(("pay_full_status_paid", () =>
         {
-            _fullRes = J(Tool.RecordPayment(_invId, 71.05m, "bank"));
+            _fullRes = J(Tool.RecordPayment(_invId, _invGrandTotal - 50m, "bank"));
             Need(_fullRes!["result"]!["invoice_status"]!.GetValue<string>() == "paid", "not paid");
             return true;
         }));
@@ -433,9 +457,9 @@ internal static class Program
             Need(Close(Dec(_fullRes!["result"]!["balance"]), 0m), $"balance != 0: {_fullRes!["result"]!["balance"]}");
             return true;
         }));
-        t.Add(("pay_full_paid_total_121_05", () =>
+        t.Add(("pay_full_paid_total_grand", () =>
         {
-            Need(Close(Dec(_fullRes!["result"]!["paid_total"]), 121.05m), $"paid_total != 121.05: {_fullRes!["result"]!["paid_total"]}");
+            Need(Close(Dec(_fullRes!["result"]!["paid_total"]), _invGrandTotal), $"paid_total != grand_total ({_invGrandTotal}): {_fullRes!["result"]!["paid_total"]}");
             return true;
         }));
 
@@ -465,32 +489,251 @@ internal static class Program
 
         t.Add(("recv_ok", () =>
         {
-            _recvRes = J(Tool.ReceivePurchaseOrder(_poId)); // received exactly once here
+            // Capture SKU-1001 stock immediately before receiving so the delta is isolated
+            // from other stock movements earlier in the run (e.g. the main SO delivery).
+            _stock1001PreRecv = Dec(First(Query("SELECT stock_quantity FROM product WHERE sku = @s", P("s", "SKU-1001")))["stock_quantity"]);
+            _recvRes = J(Tool.ReceivePurchaseOrder(_poId, "[{\"sku\":\"SKU-1001\",\"quantity\":50,\"unitCost\":9.0}]", "WH1")); // received exactly once here
             Need(_recvRes!["result"] != null, "no receive result");
             return true;
         }));
-        t.Add(("recv_added_50", () =>
+        t.Add(("recv_receipt_id_guid", () =>
         {
-            var stocked = _recvRes!["result"]!["stocked"]!.AsArray();
-            Need(Close(Dec(stocked[0]!["added"]), 50m), "added != 50");
+            Need(Guid.TryParse(_recvRes!["result"]!["receipt_id"]!.GetValue<string>(), out _), "receipt_id not a GUID");
             return true;
         }));
-        t.Add(("recv_new_stock_equals_before_plus_50", () =>
+        t.Add(("recv_received_qty_50", () =>
         {
-            var stocked = _recvRes!["result"]!["stocked"]!.AsArray();
-            Need(Close(Dec(stocked[0]!["new_stock"]), _stock1001Before + 50m), $"new_stock {stocked[0]!["new_stock"]} != before({_stock1001Before})+50");
+            var rec = _recvRes!["result"]!["received"]!.AsArray();
+            Need(rec.Count == 1, $"received lines != 1: {rec.Count}");
+            Need(Close(Dec(rec[0]!["quantity_received"]), 50m), "quantity_received != 50");
+            Need(Close(Dec(rec[0]!["quantity_ordered"]), 50m), "quantity_ordered != 50");
+            return true;
+        }));
+        t.Add(("recv_variance_zero", () =>
+        {
+            var rec = _recvRes!["result"]!["received"]!.AsArray();
+            Need(Close(Dec(rec[0]!["variance"]), 0m), $"variance != 0: {rec[0]!["variance"]}");
             return true;
         }));
         t.Add(("recv_product_stock_persisted", () =>
         {
             var r = First(Query("SELECT stock_quantity FROM product WHERE sku = @s", P("s", "SKU-1001")));
-            Need(Close(Dec(r["stock_quantity"]), _stock1001Before + 50m), $"persisted stock {r["stock_quantity"]} != before+50");
+            Need(Close(Dec(r["stock_quantity"]), _stock1001PreRecv + 50m), $"persisted stock {r["stock_quantity"]} != pre-recv({_stock1001PreRecv})+50");
             return true;
         }));
         t.Add(("po_status_received", () =>
         {
             var r = First(Query("SELECT status FROM purchase_order WHERE id = @i", P("i", _poId)));
             Need(r["status"]!.GetValue<string>() == "received", "po status != received: " + r["status"]);
+            return true;
+        }));
+    }
+
+    // ────────────────────────────────────────────────────────────
+    //  v2 composed new-flow methods: quote→order→deliver→invoice→credit-note,
+    //  purchase-request→PO→receive→bill→pay→credit-note, and stock ops.
+    //  Each chain is built lazily across ordered cases via statics; a failure in a
+    //  creation case fails its dependents too (all reported, suite keeps running).
+    // ────────────────────────────────────────────────────────────
+    static void AddNewFlows(List<(string, Func<bool>)> t)
+    {
+        const string quoteLines = "[{\"sku\":\"SKU-1001\",\"quantity\":2},{\"sku\":\"SKU-2001\",\"quantity\":5,\"discountPercent\":10}]";
+        const string deliverLines = "[{\"sku\":\"SKU-1001\",\"quantity\":2},{\"sku\":\"SKU-2001\",\"quantity\":5}]";
+
+        // ---- Quote ----
+        t.Add(("quote_create_ok", () =>
+        {
+            _quoteRes = J(Tool.CreateQuote(_alpine, quoteLines, DateTime.Now.AddDays(15).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)));
+            _quoteId = _quoteRes["result"]!["quote_id"]!.GetValue<string>();
+            return true;
+        }));
+        t.Add(("quote_id_guid", () => { Need(Guid.TryParse(_quoteId, out _), "quote_id not a GUID"); return true; }));
+        t.Add(("quote_number_present", () => { Need(!string.IsNullOrEmpty(_quoteRes!["result"]!["quote_number"]!.GetValue<string>()), "no quote_number"); return true; }));
+        t.Add(("quote_totals_present", () =>
+        {
+            var r = _quoteRes!["result"]!;
+            Need(r["subtotal"] != null && r["vat_total"] != null && r["grand_total"] != null, "missing totals");
+            Need(Dec(r["grand_total"]) >= Dec(r["subtotal"]), "grand_total < subtotal");
+            return true;
+        }));
+        t.Add(("quote_lines_shape", () =>
+        {
+            var lines = _quoteRes!["result"]!["lines"]!.AsArray();
+            Need(lines.Count == 2, $"quote lines != 2: {lines.Count}");
+            foreach (var l in lines)
+                Need(l!["sku"] != null && l["line_total"] != null && l["vat_amount"] != null, "quote line missing sku/line_total/vat_amount");
+            return true;
+        }));
+        t.Add(("quote_invalid_guid_error", () => { Err(Tool.CreateQuote("bad-guid", quoteLines)); return true; }));
+        t.Add(("quote_empty_lines_error", () => { Err(Tool.CreateQuote(_alpine, "[]")); return true; }));
+
+        // ---- Quote -> Order ----
+        t.Add(("q2o_ok", () =>
+        {
+            _q2oRes = J(Tool.ConvertQuoteToOrder(_quoteId));
+            _q2oOrderId = _q2oRes["result"]!["order_id"]!.GetValue<string>();
+            return true;
+        }));
+        t.Add(("q2o_order_id_guid", () => { Need(Guid.TryParse(_q2oOrderId, out _), "converted order_id not a GUID"); return true; }));
+        t.Add(("q2o_totals_present", () =>
+        {
+            var r = _q2oRes!["result"]!;
+            Need(r["total"] != null && r["grand_total"] != null, "converted order missing totals");
+            return true;
+        }));
+        t.Add(("q2o_invalid_guid_error", () => { Err(Tool.ConvertQuoteToOrder("bad-guid")); return true; }));
+
+        // ---- Deliver the converted order ----
+        t.Add(("deliver_q_ok", () =>
+        {
+            _delivQRes = J(Tool.DeliverSalesOrder(_q2oOrderId, deliverLines, "WH1"));
+            return true;
+        }));
+        t.Add(("deliver_q_id_guid", () => { Need(Guid.TryParse(_delivQRes!["result"]!["delivery_id"]!.GetValue<string>(), out _), "delivery_id not a GUID"); return true; }));
+        t.Add(("deliver_q_warehouse", () => { Need(_delivQRes!["result"]!["warehouse"]!.GetValue<string>() == "WH1", "warehouse != WH1"); return true; }));
+        t.Add(("deliver_q_delivered_shape", () =>
+        {
+            var d = _delivQRes!["result"]!["delivered"]!.AsArray();
+            Need(d.Count == 2, $"delivered lines != 2: {d.Count}");
+            foreach (var l in d) Need(l!["sku"] != null && l["quantity"] != null, "delivered line missing sku/quantity");
+            return true;
+        }));
+        t.Add(("deliver_q_order_status_delivered", () => { Need(_delivQRes!["result"]!["order_status"]!.GetValue<string>() == "delivered", "order_status != delivered"); return true; }));
+        t.Add(("deliver_invalid_guid_error", () => { Err(Tool.DeliverSalesOrder("bad-guid", deliverLines)); return true; }));
+        t.Add(("deliver_empty_lines_error", () => { Err(Tool.DeliverSalesOrder(_q2oOrderId, "[]")); return true; }));
+
+        // ---- Invoice the delivered converted order, then credit-note it ----
+        t.Add(("invoice_q_ok", () =>
+        {
+            _invQRes = J(Tool.InvoiceSalesOrder(_q2oOrderId, 30));
+            _invQId = _invQRes["result"]!["invoice_id"]!.GetValue<string>();
+            _invQGrandTotal = Dec(_invQRes["result"]!["grand_total"]);
+            return true;
+        }));
+        t.Add(("credit_note_ok", () =>
+        {
+            _cnRes = J(Tool.CreateCreditNote(_invQId, 10m, "goodwill"));
+            Need(Guid.TryParse(_cnRes["result"]!["credit_note_id"]!.GetValue<string>(), out _), "credit_note_id not a GUID");
+            Need(Close(Dec(_cnRes["result"]!["amount"]), 10m), "credit amount != 10");
+            return true;
+        }));
+        t.Add(("credit_note_outstanding_reduced", () =>
+        {
+            Need(Close(Dec(_cnRes!["result"]!["outstanding"]), _invQGrandTotal - 10m), $"outstanding != grand-10 ({_invQGrandTotal - 10m}): {_cnRes!["result"]!["outstanding"]}");
+            return true;
+        }));
+        t.Add(("credit_note_invalid_guid_error", () => { Err(Tool.CreateCreditNote("bad-guid", 10m)); return true; }));
+        t.Add(("credit_note_nonpositive_error", () => { Err(Tool.CreateCreditNote(_invQId, 0m)); Err(Tool.CreateCreditNote(_invQId, -5m)); return true; }));
+
+        // ---- Purchase request -> PO -> receive -> bill -> pay -> credit-note ----
+        const string prLines = "[{\"sku\":\"SKU-1001\",\"quantity\":20,\"estimatedCost\":9.0}]";
+        t.Add(("purchase_request_ok", () =>
+        {
+            _prRes = J(Tool.CreatePurchaseRequest(prLines, "QA"));
+            _prId = _prRes["result"]!["request_id"]!.GetValue<string>();
+            return true;
+        }));
+        t.Add(("pr_id_guid", () => { Need(Guid.TryParse(_prId, out _), "request_id not a GUID"); return true; }));
+        t.Add(("pr_number_present", () => { Need(!string.IsNullOrEmpty(_prRes!["result"]!["request_number"]!.GetValue<string>()), "no request_number"); return true; }));
+        t.Add(("pr_lines_shape", () =>
+        {
+            var lines = _prRes!["result"]!["lines"]!.AsArray();
+            Need(lines.Count == 1 && lines[0]!["sku"]!.GetValue<string>() == "SKU-1001", "pr lines shape wrong");
+            return true;
+        }));
+        t.Add(("pr_empty_lines_error", () => { Err(Tool.CreatePurchaseRequest("[]")); return true; }));
+
+        t.Add(("r2po_ok", () =>
+        {
+            _r2poRes = J(Tool.ConvertRequestToPurchaseOrder(_prId, _supplier));
+            _r2poPoId = _r2poRes["result"]!["purchase_order_id"]!.GetValue<string>();
+            return true;
+        }));
+        t.Add(("r2po_po_id_guid", () => { Need(Guid.TryParse(_r2poPoId, out _), "purchase_order_id not a GUID"); return true; }));
+        t.Add(("r2po_totals_present", () => { var r = _r2poRes!["result"]!; Need(r["total"] != null && r["grand_total"] != null, "converted PO missing totals"); return true; }));
+        t.Add(("r2po_invalid_request_guid_error", () => { Err(Tool.ConvertRequestToPurchaseOrder("bad-guid", _supplier)); return true; }));
+        t.Add(("r2po_invalid_supplier_guid_error", () => { Err(Tool.ConvertRequestToPurchaseOrder(_prId, "bad-guid")); return true; }));
+
+        t.Add(("receive_chain_ok", () =>
+        {
+            _recvChainRes = J(Tool.ReceivePurchaseOrder(_r2poPoId, "[{\"sku\":\"SKU-1001\",\"quantity\":20,\"unitCost\":9.0}]", "WH1"));
+            Need(_recvChainRes!["result"] != null, "no receive result in chain");
+            return true;
+        }));
+
+        t.Add(("register_bill_ok", () =>
+        {
+            _billRes = J(Tool.RegisterPurchaseInvoice(_r2poPoId, "[{\"sku\":\"SKU-1001\",\"quantity\":20,\"unitCost\":9.0}]"));
+            _billId = _billRes["result"]!["bill_id"]!.GetValue<string>();
+            Need(Guid.TryParse(_billId, out _), "bill_id not a GUID");
+            return true;
+        }));
+        t.Add(("register_bill_triple_match", () =>
+        {
+            var r = _billRes!["result"]!;
+            Need(r["triple_match_status"]!.GetValue<string>() == "matched", $"triple_match_status != matched: {r["triple_match_status"]}");
+            Need(r["mismatches"]!.AsArray().Count == 0, "mismatches should be empty");
+            return true;
+        }));
+        t.Add(("pinvoice_invalid_guid_error", () => { Err(Tool.RegisterPurchaseInvoice("bad-guid", "[{\"sku\":\"SKU-1001\",\"quantity\":20}]")); return true; }));
+        t.Add(("pinvoice_empty_lines_error", () => { Err(Tool.RegisterPurchaseInvoice(_r2poPoId, "[]")); return true; }));
+
+        t.Add(("supplier_pay_ok", () =>
+        {
+            decimal billGrand = Dec(_billRes!["result"]!["grand_total"]);
+            _supPayRes = J(Tool.PaySupplierBill(_billId, 100m, "bank"));
+            var r = _supPayRes!["result"]!;
+            Need(r["bill_status"]!.GetValue<string>() == "partial", $"bill_status != partial: {r["bill_status"]}");
+            Need(Close(Dec(r["paid_total"]), 100m), "paid_total != 100");
+            Need(Close(Dec(r["balance"]), billGrand - 100m), $"balance != grand-100 ({billGrand - 100m}): {r["balance"]}");
+            return true;
+        }));
+        t.Add(("suppay_invalid_guid_error", () => { Err(Tool.PaySupplierBill("bad-guid", 10m)); return true; }));
+        t.Add(("suppay_nonpositive_error", () => { Err(Tool.PaySupplierBill(_billId, 0m)); Err(Tool.PaySupplierBill(_billId, -3m)); return true; }));
+
+        t.Add(("supplier_credit_note_ok", () =>
+        {
+            _scnRes = J(Tool.CreateSupplierCreditNote(_billId, 20m, "damaged"));
+            Need(Guid.TryParse(_scnRes["result"]!["credit_note_id"]!.GetValue<string>(), out _), "supplier credit_note_id not a GUID");
+            Need(Close(Dec(_scnRes["result"]!["amount"]), 20m), "supplier credit amount != 20");
+            return true;
+        }));
+        t.Add(("scn_invalid_guid_error", () => { Err(Tool.CreateSupplierCreditNote("bad-guid", 10m)); return true; }));
+        t.Add(("scn_nonpositive_error", () => { Err(Tool.CreateSupplierCreditNote(_billId, 0m)); Err(Tool.CreateSupplierCreditNote(_billId, -1m)); return true; }));
+
+        // ---- Stock operations ----
+        t.Add(("transfer_stock_ok", () =>
+        {
+            var r = J(Tool.TransferStock("SKU-1001", "WH1", "WH2", 5m))!["result"]!;
+            Need(r["sku"]!.GetValue<string>() == "SKU-1001" && r["from"]!.GetValue<string>() == "WH1" && r["to"]!.GetValue<string>() == "WH2", "transfer echo wrong");
+            Need(Close(Dec(r["quantity"]), 5m), "transfer quantity != 5");
+            Need(Guid.TryParse(r["transfer_ref"]!.GetValue<string>(), out _), "transfer_ref not a GUID");
+            return true;
+        }));
+        t.Add(("transfer_negative_stock_error", () => { Err(Tool.TransferStock("SKU-1001", "WH1", "WH2", 999999m)); return true; }));
+        t.Add(("transfer_empty_sku_error", () => { Err(Tool.TransferStock("", "WH1", "WH2", 5m)); return true; }));
+        t.Add(("transfer_missing_warehouse_error", () => { Err(Tool.TransferStock("SKU-1001", "WH1", "", 5m)); return true; }));
+        t.Add(("transfer_nonpositive_qty_error", () => { Err(Tool.TransferStock("SKU-1001", "WH1", "WH2", 0m)); return true; }));
+
+        t.Add(("adjust_stock_ok", () =>
+        {
+            var r = J(Tool.AdjustStock("SKU-1002", "WH1", 250m, "cycle count"))!["result"]!;
+            Need(r["sku"]!.GetValue<string>() == "SKU-1002" && r["warehouse"]!.GetValue<string>() == "WH1", "adjust echo wrong");
+            Need(Close(Dec(r["new_quantity"]), 250m), "new_quantity != 250");
+            Need(Close(Dec(r["delta"]), 250m - Dec(r["old_quantity"])), "delta != new - old");
+            return true;
+        }));
+        t.Add(("adjust_empty_sku_error", () => { Err(Tool.AdjustStock("", "WH1", 10m)); return true; }));
+        t.Add(("adjust_missing_warehouse_error", () => { Err(Tool.AdjustStock("SKU-1002", "", 10m)); return true; }));
+
+        // ---- Business rules ----
+        t.Add(("blocked_customer_order_error", () => { Err(Tool.PlaceSalesOrder(_suspended, "[{\"sku\":\"SKU-1001\",\"quantity\":1}]")); return true; }));
+        t.Add(("over_delivery_error", () =>
+        {
+            // Fresh order of 2, then try to deliver 5 -> must be rejected.
+            var so = J(Tool.PlaceSalesOrder(_alpine, "[{\"sku\":\"SKU-1001\",\"quantity\":2}]"));
+            var oid = so!["result"]!["order_id"]!.GetValue<string>();
+            Err(Tool.DeliverSalesOrder(oid, "[{\"sku\":\"SKU-1001\",\"quantity\":5}]", "WH1"));
             return true;
         }));
     }
@@ -514,7 +757,7 @@ internal static class Program
         t.Add(("neg_pay_missing_invoice_error", () => { Err(Tool.RecordPayment("11111111-1111-1111-1111-111111111111", 10m)); return true; }));
         t.Add(("neg_po_invalid_guid_error", () => { Err(Tool.PlacePurchaseOrder("bad-guid", "[{\"sku\":\"SKU-1001\",\"quantity\":1}]")); return true; }));
         t.Add(("neg_po_empty_lines_error", () => { Err(Tool.PlacePurchaseOrder(_supplier, "[]")); return true; }));
-        t.Add(("neg_recv_invalid_guid_error", () => { Err(Tool.ReceivePurchaseOrder("bad-guid")); return true; }));
+        t.Add(("neg_recv_invalid_guid_error", () => { Err(Tool.ReceivePurchaseOrder("bad-guid", "[{\"sku\":\"SKU-1001\",\"quantity\":1}]")); return true; }));
         t.Add(("neg_update_invalid_guid_error", () => { Err(Tool.UpdateRecord("customer", "bad-guid", "{\"city\":\"x\"}")); return true; }));
         t.Add(("neg_delete_invalid_guid_error", () => { Err(Tool.DeleteRecord("customer", "bad-guid")); return true; }));
         t.Add(("neg_create_fields_not_object_error", () => { Err(Tool.CreateRecord("customer", "[1,2,3]")); return true; }));
