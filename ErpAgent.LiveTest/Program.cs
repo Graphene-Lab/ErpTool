@@ -60,6 +60,9 @@ static class Program
     // v7 (multi-currency / lifecycle / date-range) state
     static decimal _p2pStockBefore = 0m;
     static string _dateRangeToday = "";
+    // v8 aging delta baseline (so the aging check is correct on an accumulated DB, not only a fresh one)
+    static decimal _agingAmtBefore = 0m;
+    static int _agingCntBefore = 0;
     static List<string> _lastToolCalls = new();
 
     static async Task<int> Main()
@@ -753,9 +756,13 @@ static class Program
         new("Receivables aging / scadenzario (cat 40)",
             () =>
             {
+                // Capture the 61-90 bucket BEFORE adding our invoice, so the check is a delta and
+                // stays correct even when the DB already holds open 61-90 invoices from earlier runs.
+                var before = FindInReport(Composed("aging-receivables", new JsonObject()), "buckets", "label", "61-90");
+                _agingAmtBefore = before == null ? 0m : Dec(before["amount"]);
+                _agingCntBefore = before?["invoice_count"]?.GetValue<int>() ?? 0;
                 CreateCustomerDirect($"AgingCo-{Tag}", "EUR");
-                // 75 days overdue → 61-90 bucket, which no other scenario touches (S40 uses 40
-                // days = 31-60), so the bucket stays isolated on a fresh DB for an exact check.
+                // 75 days overdue → 61-90 bucket (S40 uses 40 days = 31-60).
                 CreateOverdueInvoiceDirect($"AgingCo-{Tag}", 75, 100m);
             },
             () => "Show the receivables aging report (scadenzario).",
@@ -767,8 +774,8 @@ static class Program
                 if (b == null) return (false, $"agent called aging_receivables={called}; 61-90 bucket missing");
                 var amt = Dec(b["amount"]);
                 var cnt = b["invoice_count"]?.GetValue<int>() ?? 0;
-                var ok = called && Math.Abs(amt - 100m) < 0.01m && cnt == 1;
-                return (ok, $"called={called}, 61-90 bucket amount={amt} (exp 100), count={cnt} (exp 1)");
+                var ok = called && Math.Abs(amt - (_agingAmtBefore + 100m)) < 0.01m && cnt == _agingCntBefore + 1;
+                return (ok, $"called={called}, 61-90 bucket amount={amt} (exp {_agingAmtBefore + 100m}), count={cnt} (exp {_agingCntBefore + 1})");
             }),
 
         new("Blocked customer cannot be invoiced (negative)",

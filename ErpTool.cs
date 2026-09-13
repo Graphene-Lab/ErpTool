@@ -626,48 +626,26 @@ public class ErpTool : BaseAgentTool
         return Call("POST", "composed/proforma-to-invoice", body, "convert proforma to invoice");
     }
 
-    /// <summary>Post an invoice (mark it registered in the ledger), in one call.</summary>
+    /// <summary>Run a lifecycle action on an invoice, in one call. Pick the action by name.</summary>
+    /// <param name="action">One of: "post" (mark it registered in the ledger), "storno" (reverse it with a mirror invoice of negated amounts), "duplicate" (copy it and its lines into a new draft), "cancel" (cancel it; only if not posted — a posted invoice must be storned instead).</param>
     /// <param name="invoiceId">Invoice id (GUID).</param>
-    /// <returns>JSON with the invoice id and posted=true, or "Error:" with the cause.</returns>
-    public string PostInvoice(string invoiceId)
+    /// <returns>JSON describing the result of the action (posted flag, new/storno id, or new status), or "Error:" with the cause.</returns>
+    public string ManageInvoice(string action, string invoiceId)
     {
-        Log.LogStep($"ErpTool.PostInvoice: invoice={invoiceId}");
+        Log.LogStep($"ErpTool.ManageInvoice: action={action} invoice={invoiceId}");
         if (!Guid.TryParse(invoiceId, out var iid)) return "Error: 'invoiceId' must be a valid GUID.";
+        var (verb, endpoint) = (action ?? "").Trim().ToLowerInvariant() switch
+        {
+            "post" => ("post invoice", "composed/post-invoice"),
+            "storno" => ("storno invoice", "composed/storno-invoice"),
+            "duplicate" => ("duplicate invoice", "composed/duplicate-invoice"),
+            "cancel" => ("cancel invoice", "composed/cancel-invoice"),
+            _ => ("", "")
+        };
+        if (string.IsNullOrEmpty(endpoint))
+            return "Error: 'action' must be one of: post, storno, duplicate, cancel.";
         var body = new JsonObject { ["invoice_id"] = iid.ToString() };
-        return Call("POST", "composed/post-invoice", body, "post invoice");
-    }
-
-    /// <summary>Storno (reverse) an invoice by creating a mirror invoice with negated amounts, in one call.</summary>
-    /// <param name="invoiceId">Invoice id (GUID) to reverse.</param>
-    /// <returns>JSON with the storno invoice id and the original invoice id, or "Error:" with the cause.</returns>
-    public string StornoInvoice(string invoiceId)
-    {
-        Log.LogStep($"ErpTool.StornoInvoice: invoice={invoiceId}");
-        if (!Guid.TryParse(invoiceId, out var iid)) return "Error: 'invoiceId' must be a valid GUID.";
-        var body = new JsonObject { ["invoice_id"] = iid.ToString() };
-        return Call("POST", "composed/storno-invoice", body, "storno invoice");
-    }
-
-    /// <summary>Duplicate an invoice and its lines into a new draft, in one call.</summary>
-    /// <param name="invoiceId">Invoice id (GUID) to duplicate.</param>
-    /// <returns>JSON with the new draft invoice id/number, or "Error:" with the cause.</returns>
-    public string DuplicateInvoice(string invoiceId)
-    {
-        Log.LogStep($"ErpTool.DuplicateInvoice: invoice={invoiceId}");
-        if (!Guid.TryParse(invoiceId, out var iid)) return "Error: 'invoiceId' must be a valid GUID.";
-        var body = new JsonObject { ["invoice_id"] = iid.ToString() };
-        return Call("POST", "composed/duplicate-invoice", body, "duplicate invoice");
-    }
-
-    /// <summary>Cancel an invoice (must not be posted; a posted invoice must be storned), in one call.</summary>
-    /// <param name="invoiceId">Invoice id (GUID).</param>
-    /// <returns>JSON with the invoice id and status=cancelled, or "Error:" with the cause.</returns>
-    public string CancelInvoice(string invoiceId)
-    {
-        Log.LogStep($"ErpTool.CancelInvoice: invoice={invoiceId}");
-        if (!Guid.TryParse(invoiceId, out var iid)) return "Error: 'invoiceId' must be a valid GUID.";
-        var body = new JsonObject { ["invoice_id"] = iid.ToString() };
-        return Call("POST", "composed/cancel-invoice", body, "cancel invoice");
+        return Call("POST", endpoint, body, verb);
     }
 
     /// <summary>Collect cash across several invoices with an optional allowance (abbuono), in one call. The amount is allocated over the invoices' outstanding balances in order (partial allowed). Reference invoices by GUID (invoiceIds) or by the human-readable invoice numbers you see on screen (invoiceNumbers).</summary>
@@ -712,43 +690,27 @@ public class ErpTool : BaseAgentTool
         return Call("POST", "composed/customer-statement", body, "customer statement");
     }
 
-    /// <summary>Manager report: sales revenue grouped by customer over an optional issue-date range (inclusive). Storned invoices are excluded. Sorted by gross total descending.</summary>
-    /// <param name="fromDate">Optional start issue date (yyyy-MM-dd); omit for unbounded.</param>
-    /// <param name="toDate">Optional end issue date (yyyy-MM-dd); omit for unbounded.</param>
-    /// <returns>JSON with the per-customer totals (customer_name, invoice_count, net_total, vat_total, gross_total), or "Error:" with the cause.</returns>
-    public string SalesByCustomer(string? fromDate = null, string? toDate = null)
+    /// <summary>Manager report over an optional date range (inclusive). Pick the report by type.</summary>
+    /// <param name="reportType">One of: "sales_by_customer" (revenue per customer, sorted by gross desc), "sales_by_product" (quantity and net per product, sorted by net desc), "purchases_by_supplier" (cost per supplier, sorted by gross desc).</param>
+    /// <param name="fromDate">Optional start date (yyyy-MM-dd); omit for unbounded.</param>
+    /// <param name="toDate">Optional end date (yyyy-MM-dd); omit for unbounded.</param>
+    /// <returns>JSON with the grouped totals for the chosen report, or "Error:" with the cause.</returns>
+    public string Report(string reportType, string? fromDate = null, string? toDate = null)
     {
-        Log.LogStep($"ErpTool.SalesByCustomer: from={fromDate} to={toDate}");
+        Log.LogStep($"ErpTool.Report: type={reportType} from={fromDate} to={toDate}");
+        var endpoint = (reportType ?? "").Trim().ToLowerInvariant() switch
+        {
+            "sales_by_customer" => "composed/sales-by-customer",
+            "sales_by_product" => "composed/sales-by-product",
+            "purchases_by_supplier" => "composed/purchases-by-supplier",
+            _ => ""
+        };
+        if (string.IsNullOrEmpty(endpoint))
+            return "Error: 'reportType' must be one of: sales_by_customer, sales_by_product, purchases_by_supplier.";
         var body = new JsonObject();
         if (!string.IsNullOrWhiteSpace(fromDate)) body["from_date"] = fromDate;
         if (!string.IsNullOrWhiteSpace(toDate)) body["to_date"] = toDate;
-        return Call("POST", "composed/sales-by-customer", body, "sales by customer");
-    }
-
-    /// <summary>Manager report: sales revenue grouped by product over an optional issue-date range (inclusive). Only product lines of non-storned sales invoices are counted. Sorted by net total descending.</summary>
-    /// <param name="fromDate">Optional start issue date (yyyy-MM-dd); omit for unbounded.</param>
-    /// <param name="toDate">Optional end issue date (yyyy-MM-dd); omit for unbounded.</param>
-    /// <returns>JSON with the per-product totals (sku, product_name, total_quantity, net_total), or "Error:" with the cause.</returns>
-    public string SalesByProduct(string? fromDate = null, string? toDate = null)
-    {
-        Log.LogStep($"ErpTool.SalesByProduct: from={fromDate} to={toDate}");
-        var body = new JsonObject();
-        if (!string.IsNullOrWhiteSpace(fromDate)) body["from_date"] = fromDate;
-        if (!string.IsNullOrWhiteSpace(toDate)) body["to_date"] = toDate;
-        return Call("POST", "composed/sales-by-product", body, "sales by product");
-    }
-
-    /// <summary>Manager report: purchase cost grouped by supplier over an optional bill-date range (inclusive). Sorted by gross total descending.</summary>
-    /// <param name="fromDate">Optional start bill date (yyyy-MM-dd); omit for unbounded.</param>
-    /// <param name="toDate">Optional end bill date (yyyy-MM-dd); omit for unbounded.</param>
-    /// <returns>JSON with the per-supplier totals (supplier_name, invoice_count, net_total, vat_total, gross_total), or "Error:" with the cause.</returns>
-    public string PurchasesBySupplier(string? fromDate = null, string? toDate = null)
-    {
-        Log.LogStep($"ErpTool.PurchasesBySupplier: from={fromDate} to={toDate}");
-        var body = new JsonObject();
-        if (!string.IsNullOrWhiteSpace(fromDate)) body["from_date"] = fromDate;
-        if (!string.IsNullOrWhiteSpace(toDate)) body["to_date"] = toDate;
-        return Call("POST", "composed/purchases-by-supplier", body, "purchases by supplier");
+        return Call("POST", endpoint, body, reportType);
     }
 
     /// <summary>Manager report: receivables aging (scadenzario). Every open sales invoice (not storned, not draft/cancelled, with a positive outstanding balance) is bucketed by how far its due date is from today.</summary>
@@ -760,40 +722,34 @@ public class ErpTool : BaseAgentTool
         return Call("POST", "composed/aging-receivables", body, "aging receivables");
     }
 
-    /// <summary>Reserve stock of a SKU in a warehouse for an order, in one call.</summary>
+    /// <summary>Reserve or release stock of a SKU in a warehouse, in one call.</summary>
+    /// <param name="action">"reserve" to hold stock for an order, or "release" to free a reservation (up to the given quantity).</param>
     /// <param name="sku">Product SKU.</param>
     /// <param name="warehouseCode">Warehouse code (e.g. "WH1").</param>
-    /// <param name="quantity">Quantity to reserve (positive).</param>
-    /// <param name="orderId">Optional sales order id (GUID).</param>
-    /// <returns>JSON with sku, warehouse and reserved quantity, or "Error:" with the cause.</returns>
-    public string ReserveStock(string sku, string warehouseCode, decimal quantity, string? orderId = null)
+    /// <param name="quantity">Quantity (positive).</param>
+    /// <param name="orderId">Optional sales order id (GUID); used with "reserve".</param>
+    /// <returns>JSON with sku, warehouse and the reserved/released quantity, or "Error:" with the cause.</returns>
+    public string ManageStock(string action, string sku, string warehouseCode, decimal quantity, string? orderId = null)
     {
-        Log.LogStep($"ErpTool.ReserveStock: {sku} @ {warehouseCode} qty={quantity}");
+        Log.LogStep($"ErpTool.ManageStock: action={action} {sku} @ {warehouseCode} qty={quantity}");
         if (string.IsNullOrWhiteSpace(sku)) return "Error: 'sku' is required.";
         if (string.IsNullOrWhiteSpace(warehouseCode)) return "Error: 'warehouseCode' is required.";
         if (quantity <= 0) return "Error: 'quantity' must be positive.";
+        var (verb, endpoint) = (action ?? "").Trim().ToLowerInvariant() switch
+        {
+            "reserve" => ("reserve stock", "composed/reserve-stock"),
+            "release" => ("release stock", "composed/release-stock"),
+            _ => ("", "")
+        };
+        if (string.IsNullOrEmpty(endpoint))
+            return "Error: 'action' must be 'reserve' or 'release'.";
         var body = new JsonObject { ["sku"] = sku, ["warehouse_code"] = warehouseCode, ["quantity"] = quantity };
         if (!string.IsNullOrWhiteSpace(orderId))
         {
             if (!Guid.TryParse(orderId, out var oid)) return "Error: 'orderId' must be a valid GUID.";
             body["order_id"] = oid.ToString();
         }
-        return Call("POST", "composed/reserve-stock", body, "reserve stock");
-    }
-
-    /// <summary>Release reservations for a SKU in a warehouse (up to the given quantity), in one call.</summary>
-    /// <param name="sku">Product SKU.</param>
-    /// <param name="warehouseCode">Warehouse code (e.g. "WH1").</param>
-    /// <param name="quantity">Quantity to release (positive).</param>
-    /// <returns>JSON with sku, warehouse and released quantity, or "Error:" with the cause.</returns>
-    public string ReleaseStock(string sku, string warehouseCode, decimal quantity)
-    {
-        Log.LogStep($"ErpTool.ReleaseStock: {sku} @ {warehouseCode} qty={quantity}");
-        if (string.IsNullOrWhiteSpace(sku)) return "Error: 'sku' is required.";
-        if (string.IsNullOrWhiteSpace(warehouseCode)) return "Error: 'warehouseCode' is required.";
-        if (quantity <= 0) return "Error: 'quantity' must be positive.";
-        var body = new JsonObject { ["sku"] = sku, ["warehouse_code"] = warehouseCode, ["quantity"] = quantity };
-        return Call("POST", "composed/release-stock", body, "release stock");
+        return Call("POST", endpoint, body, verb);
     }
 
     /// <summary>Process a supplier return: record the return and reduce warehouse stock, in one call.</summary>
