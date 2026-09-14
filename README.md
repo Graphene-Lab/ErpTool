@@ -13,6 +13,26 @@ ErpTool is a plugin tool. It is published in two channels:
 The class derives from `BaseAgentTool`. Each public method becomes a tool method for the LLM
 (with a snake_case name).
 
+## Where it fits
+
+ErpTool is one of three small programs that work together to let an AI agent run a company:
+
+| Part | Repo | Job |
+|---|---|---|
+| **AI ERP** | [Graphene-Lab/AI-ERP](https://github.com/Graphene-Lab/AI-ERP) | The ERP: stores the data, runs the real operations, enforces the rules and permissions. |
+| **AgentBridge** | [Graphene-Lab/AgentBridge](https://github.com/Graphene-Lab/AgentBridge) | The chat front-end and the agent runtime (AIOrchestrator). You talk to the agent here. |
+| **ErpTool** | this repository | The bridge: turns the agent's decisions into secure calls to the ERP. |
+
+```
+You → AgentBridge → AIOrchestrator (the agent) → ErpTool → HTTPS + JWT → AgentApi → AI ERP
+```
+
+ErpTool runs inside AgentBridge as a plugin (dropped into `Tools/ErpTool/`). The agent reads
+the ERP schema, picks a method, and ErpTool calls the ERP's `AgentApi` over HTTPS with a JWT.
+The ERP checks the permissions of the logged-in account and does the real work. The step-by-step
+guide for the whole ecosystem is in the
+[AI ERP wiki](https://github.com/Graphene-Lab/AI-ERP/wiki).
+
 ## Methods
 
 | Method | What it does |
